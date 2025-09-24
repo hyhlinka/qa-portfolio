@@ -1,0 +1,348 @@
+Проект: Арест карты (финтех, веб + мобильные клиенты)
+
+Кратко: функциональность для установки/снятия ареста на банковскую карту по постановлениям. Поддержка частичного/полного ареста, нескольких арестов, приоритетов, влияния на авторизации и уведомлений клиента.
+
+
+README.md
+
+Кратко: цель, артефакты, как воспроизвести.
+
+```
+Арест карты — QA портфолио
+
+Цель: проверить корректность логики ареста (full/partial/multi), приоритетов и влияния на авторизации/листинги операций/уведомления.
+
+Артефакты:
+- Тест‑план, RTM, тест‑кейсы (веб/мобайл/API/интеграции)
+- Коллекция Postman, OpenAPI, примеры запросов/ответов
+- SQL проверки балансов/арестов/проводок
+- Логи (Kibana), сниффинг (Charles), дефекты, отчёт о прогонах
+
+Быстрый старт:
+1. Импортируйте `api/postman_collection.json` в Postman, выставьте переменные `{{base_url}}`, `{{token}}`.
+2. Создайте тестовую карту из набора `data/test-data.csv`.
+3. Запустите кейсы из `test-cases/api-cases.md` (smoke), затем интеграцию `integration-auth-clearing.md`.
+4. Верифицируйте балансы SQL скриптами и уведомления (Charles/Kibana).
+```
+
+---
+
+requirements.md
+
+- Типы арестов: полный, частичный (сумма), множественные аресты.
+- Приоритет: аресты госорганов > внутренних блокировок банка > добровольной “заморозки” клиентом.
+- Влияние на операции:
+  - Карточные авторизации CNP/CP, контакт/безконтакт, токены (Apple Pay/Google Pay).
+  - Исключения: возвраты, отмены предавторизаций, списания комиссий банка, обязательные платежи [оговариваются].
+- Отчётность/аудит: запись всех действий (кто, когда, причина, документ, TTL/срок).
+- Нотификации: пуш/SMS/email на установку, изменение, снятие.
+- Доступы: только роли Back‑office с правами ARREST_CREATE/ADJUST/RELEASE.
+- Idempotency: заголовок Idempotency‑Key для POST/POST‑adjust.
+
+---
+
+acceptance-criteria.md
+
+- AC‑01 Создание полного ареста: при активном статусе карты и положительном/нулевом балансе любая новая авторизация отклоняется с кодом bank_decline, reason=ARREST.
+- AC‑02 Частичный арест: сумма доступного остатка уменьшается на сумму ареста; операции до свободного лимита проходят, сверх — отклоняются.
+- AC‑03 Мультиаресты: применяются по дате/приоритету; при расчетах доступный лимит = баланс − Σ активных арестов.
+- AC‑04 Исключения: возвраты и отмены предавторизаций должны проходить независимо от ареста.
+- AC‑05 Уведомления: клиент получает уведомление в течение ≤ 60 сек после события; текст соответствует шаблону и локали.
+- AC‑06 Аудит: все изменения фиксируются с неизменяемым идентификатором события.
+- AC‑07 Снятие ареста — немедленно отражается в доступном остатке и авторизациях.
+- AC‑08 Идемпотентность: повтор POST с тем же Idempotency‑Key не создает дубликатов.
+
+---
+
+use-cases.md
+
+- UC‑01 Установка полного ареста на карту по постановлению.
+- UC‑02 Установка частичного ареста на сумму N.
+- UC‑03 Сосуществование 2+ арестов разных источников, проверка приоритета.
+- UC‑04 Корректировка суммы ареста.
+- UC‑05 Снятие ареста.
+- UC‑06 Платеж при аресте: CNP, CP, токены, предавторизация/чаевые/офлайн‑операции.
+- UC‑07 Возврат при аресте.
+- UC‑08 Клиентские уведомления и логи аудита.
+
+---
+
+test-plan.md
+
+- Область: веб Back‑office, API арестов, мобильные уведомления, процессинг авторизаций/клиринга, отчётность/аудит.
+- Вне области: выпуск карт, KYC, 3DS сервер (только как контекст).
+- Стратегия:
+  - Smoke: создание/снятие ареста, блокировка авторизации, уведомления.
+  - Функциональные: partial/full/multi, приоритеты, исключения.
+  - Интеграционные: auth → clearing → отчётность/выписка.
+  - Регресс: чек‑лист.
+  - Негативные: права доступов, идемпотентность, гонки.
+- Окружения: DEV, UAT, мобильные (iOS/Android), тестовые токены.
+- Данные: выделенные тест‑карты, аресты c уникальными external_id, фикстуры сумм/валют.
+- Риски: задержки нотификаций, неконсистентный баланс, дубли арестов, приоритеты.
+- Вход/выход: требования согласованы; выход — pass rate ≥ 95%, критических дефектов 0, покрытие RTM ≥ 85%.
+- Инструменты: Jira + Zephyr, Postman/Newman, DBeaver, Kibana, Charles, DevTools.
+- Отчётность: daily статус, финальный test‑summary.
+
+---
+
+rtm.csv (фрагмент)
+
+```
+REQ_ID,AC,TEST_ID,AREA,STATUS
+REQ-AR-01,AC-01,API-001,API,PASS
+REQ-AR-02,AC-02,API-004,API,PASS
+REQ-AR-03,AC-03,INT-007,Integration,IN PROGRESS
+REQ-AR-04,AC-05,MOB-003,Mobile,PASS
+REQ-AR-05,AC-08,API-010,API,PASS
+```
+
+---
+
+test-cases/api-cases.md (фрагмент)
+
+- API-001 Создание полного ареста
+  - Предусловия: карта ACTIVE, баланс 5 000
+  - Шаги:
+    1. POST /arrests с body `{type: "FULL", card_id, reason, external_id}`
+    2. GET /cards/{id}/available_amount
+    3. Тестовая авторизация на 100
+  - Ожидаемо:
+    - 201 Created, статус ACTIVE
+    - available_amount = 0
+    - auth declined, code=ARREST
+
+- API-004 Частичный арест 1 500
+  - Шаги:
+    1. POST /arrests `{type:"PARTIAL", amount:1500}`
+    2. Авторизация на 1 000 — approve
+    3. Авторизация на 700 — decline ARREST
+  - Ожидаемо: первая проходит, вторая отклонена.
+
+- API-010 Идемпотентность
+  - Шаги:
+    1. POST /arrests c Idempotency-Key: K1
+    2. Повторить тот же запрос
+  - Ожидаемо: второй ответ — 200/201 с тем же arrest_id, без дубля в БД.
+
+Полный набор — в файле (включая adjust/release, multi‑arrest, исключения по refund/reversal, токены Apple/Google Pay, офлайн‑операции, предавторизации/чаевые, валютные операции).
+
+---
+
+test-cases/integration-auth-clearing.md (фрагмент)
+
+- INT-007 Мультиарест + клиринг
+  - Предусловия: PARTIAL 1 000 (court), PARTIAL 500 (bank)
+  - Шаги:
+    1. Auth 900 — approve
+    2. Auth 400 — decline
+    3. Clearing 900
+    4. Release ареста court
+    5. Auth 600 — approve
+  - Ожидаемо: приоритет court > bank, доступный лимит перерасчитан после клиринга и release.
+
+---
+
+test-cases/web-backoffice.md (фрагмент)
+
+- WEB-002 Валидации формы “Создать арест”
+  - Поля: card_id, type, amount (if partial), reason, document_id
+  - Негатив: amount ≤ 0, пустой reason, чужая карта, дубликат external_id
+  - Ожидаемо: корректные подсказки, кнопка Create disabled.
+
+- WEB-005 RBAC
+  - Пользователь без роли ARREST_CREATE не видит кнопку Create; попытка через API — 403.
+
+---
+
+test-cases/mobile-notifications.md (фрагмент)
+
+- MOB-003 Пуш при отклонении платежа из‑за ареста
+  - Шаги: создать арест, инициировать платеж 100
+  - Ожидаемо: пуш ≤ 60 сек, текст: “Операция отклонена: арест карты”, deeplink на справку, корректная локаль и токен‑маркер.
+
+---
+
+checklists/ui-backoffice-checklist.md (фрагмент)
+
+- Навигация/фильтры списка арестов по статусу/дате/типу — ок
+- Маска/формат суммы и валюты
+- Идемпотентность при двойном клике Create
+- Аудит‑лог виден, сортируется, экспорт в CSV
+
+checklists/security-checklist.md (фрагмент)
+
+- Доступы по ролям (ARREST_CREATE/ADJUST/RELEASE)
+- PII маскирование в логах/интерфейсе
+- Idempotency‑Key обязателен в POST/adjust
+- Подпись/воркфлоу подтверждения для court‑арестов
+
+---
+
+api/openapi-arrest.yaml (фрагмент)
+
+```
+openapi: 3.0.3
+info:
+  title: Card Arrest API
+  version: "1.0"
+paths:
+  /arrests:
+    post:
+      summary: Create arrest
+      parameters:
+        - in: header
+          name: Idempotency-Key
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              oneOf:
+                - $ref: '#/components/schemas/FullArrest'
+                - $ref: '#/components/schemas/PartialArrest'
+      responses:
+        "201": { description: Created }
+  /arrests/{id}:
+    patch:
+      summary: Adjust or release arrest
+```
+
+api/postman_collection.json (фрагмент)
+
+```
+{
+  "info": { "name": "Card Arrest API", "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json" },
+  "item": [
+    {
+      "name": "Create Partial Arrest",
+      "request": {
+        "method": "POST",
+        "header": [ { "key": "Idempotency-Key", "value": "{{uuid}}"} ],
+        "url": "{{base_url}}/arrests",
+        "body": { "mode": "raw", "raw": "{ \"type\":\"PARTIAL\",\"card_id\":\"{{card_id}}\",\"amount\":1500,\"reason\":\"court\" }" }
+      }
+    }
+  ]
+}
+```
+
+---
+
+data/test-data.csv (фрагмент)
+
+```
+card_id,balance,currency,status,notes
+C-1001,5000,RUB,ACTIVE,основная карта для FULL
+C-1002,3000,RUB,ACTIVE,partial 1500
+C-1003,0,RUB,ACTIVE,refund/chargeback сценарии
+```
+
+data/boundary-cases.csv (фрагмент)
+
+```
+case,amount,desc
+zero,0,amount=0 запрещен
+min,1,минимальный допустимый partial
+over_balance,999999999,больше любого баланса
+```
+
+---
+
+  sql/verification-queries.sql (фрагмент)
+
+```
+-- Проверить активные аресты по карте
+SELECT arrest_id, type, amount, priority, status
+FROM card_arrests
+WHERE card_id = :card_id AND status = 'ACTIVE'
+ORDER BY priority, created_at;
+
+-- Доступный остаток
+SELECT available_amount
+FROM card_balances
+WHERE card_id = :card_id;
+
+-- Последние решения авторизаций
+SELECT ts, amount, mcc, channel, decision, decline_reason
+FROM auth_decisions
+WHERE card_id = :card_id
+ORDER BY ts DESC
+LIMIT 20;
+```
+
+  sql/ledger-balance-checks.sql (фрагмент)
+
+```
+-- Сверка: available = balance - sum(active partial arrests != FULL)
+SELECT b.balance,
+       b.available_amount,
+       COALESCE(SUM(a.amount),0) AS total_arrest
+FROM card_balances b
+LEFT JOIN card_arrests a ON a.card_id=b.card_id AND a.status='ACTIVE' AND a.type='PARTIAL'
+WHERE b.card_id=:card_id
+GROUP BY b.balance,b.available_amount;
+```
+
+---
+
+  logs/kibana-queries.kql (фрагмент)
+
+```
+service:"arrest-service" AND card_id:"C-1002" AND level:INFO
+service:"auth-gateway" AND decline_reason:"ARREST"
+```
+
+---
+
+  defects/bug-reports.md (примеры)
+
+- BUG‑017 Partial арест не учитывается при tokenized CP
+  - Окружение: UAT iOS 17.5 Apple Pay
+  - Шаги: PARTIAL 500 → Apple Pay оплата 600
+  - Факт: approve
+  - Ожидание: decline ARREST
+  - Логи: auth-gateway decisionId=…; Charles: scheme=Visa tokenized
+  - Важность: Critical, Метка: payments, tokens
+
+- BUG‑023 Дубликат ареста при повторном POST без Idempotency‑Key
+  - Важность: High, Обход: временно запрещать повтор без ключа.
+
+---
+
+  reports/test-summary.md (структура)
+
+- Объем: 58 TC, покрытие RTM 92%
+- Результат: Pass 54 / Fail 4 (критических 1)
+- Ключевые дефекты: BUG‑017, BUG‑023
+- Риски: задержка пушей до 90 сек на Android (нестабильный FCM)
+- Рекомендации к релизу: блокер исправить; документировать исключения по refund
+
+  reports/metrics.md
+
+- Pass rate: 93%
+- DRE (Defect Removal Efficiency): 88%
+- Escaped defects: 0
+- Среднее время до фикса критикала: 2 д.
+
+  reports/risks.md (фрагмент)
+
+- Приоритеты арестов разных источников трактуются неоднозначно — риск расхождений.
+- Идемпотентность: отсутствие ключа ведет к дублям при ретраях.
+- Нотификации: SLA 60 сек может нарушаться при пиковых нагрузках.
+
+---
+
+  env/environments.md
+
+- DEV: https://dev.api.example.com
+- UAT: https://uat.api.example.com
+- Переменные: base_url, token, card_id, uuid
+
+  env/users-and-permissions.md
+
+- BO‑Operator: ARREST_CREATE, view
+- BO‑Supervisor: + ADJUST, RELEASE
+- Auditor: read‑only
